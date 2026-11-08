@@ -3,8 +3,8 @@
 prediction_cn_markets_day.py
 
 Description:
-    Predicts future daily K-line (1D) data for A-share markets using Kronos model and akshare.
-    The script automatically downloads the latest historical data, cleans it, and runs model inference.
+    Predicts from a local CSV snapshot. Market-data download is not deployed.
+    Network clients such as akshare are disabled in this tree.
 
 Usage:
     python prediction_cn_markets_day.py --symbol 000001
@@ -25,10 +25,18 @@ import os
 import argparse
 import time
 import pandas as pd
-import akshare as ak
+class _MarketIngestionDisabled:
+    def __getattr__(self, _name):
+        from ingestion_gate import refuse_market_ingestion
+        refuse_market_ingestion("akshare")
+
+ak = _MarketIngestionDisabled()
 import matplotlib.pyplot as plt
 import sys
-sys.path.append("../")
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from kronos_safety import safe_named_file, safe_symbol
 from model import Kronos, KronosTokenizer, KronosPredictor
 
 save_dir = "./outputs"
@@ -150,7 +158,7 @@ def plot_result(df_hist, df_pred, symbol):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plot_path = os.path.join(save_dir, f"pred_{symbol.replace('.', '_')}_chart.png")
+    plot_path = str(safe_named_file(save_dir, safe_symbol(symbol), "pred_", "_chart.png"))
     plt.savefig(plot_path)
     plt.close()
     print(f"📊 Chart saved: {plot_path}")
@@ -190,7 +198,7 @@ def predict_future(symbol):
     ]).reset_index(drop=True)
 
     # Save CSV
-    out_file = os.path.join(save_dir, f"pred_{symbol.replace('.', '_')}_data.csv")
+    out_file = str(safe_named_file(save_dir, safe_symbol(symbol), "pred_", "_data.csv"))
     df_out.to_csv(out_file, index=False)
     print(f"✅ Prediction completed and saved: {out_file}")
 

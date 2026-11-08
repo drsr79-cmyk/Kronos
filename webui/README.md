@@ -33,7 +33,7 @@ cd webui
 python app.py
 ```
 
-After successful startup, visit http://localhost:7070
+After successful startup, open http://127.0.0.1:7070 on this machine. The server does not bind every interface and does not enable the debugger. Forecasts shown here are research outputs, not paper orders or portfolio returns. Place local `model.safetensors` snapshots under `pretrained/` (or `KRONOS_MODEL_DIR`) and CSV/Feather files under `data/` (or `KRONOS_DATA_DIR`).
 
 ## 📋 Usage Steps
 

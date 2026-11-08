@@ -1,40 +1,22 @@
 #!/bin/bash
+# Start the local Kronos research UI. This script does not install packages.
 
-# Kronos Web UI startup script
+set -euo pipefail
 
-echo "🚀 Starting Kronos Web UI..."
-echo "================================"
-
-# Check if Python is installed
-if ! command -v python3 &> /dev/null; then
-    echo "❌ Python3 not installed, please install Python3 first"
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "Python 3 is required."
     exit 1
 fi
 
-# Check if in correct directory
 if [ ! -f "app.py" ]; then
-    echo "❌ Please run this script in the webui directory"
+    echo "Run this script from the webui directory."
     exit 1
 fi
 
-# Check dependencies
-echo "📦 Checking dependencies..."
-if ! python3 -c "import flask, flask_cors, pandas, numpy, plotly" &> /dev/null; then
-    echo "⚠️  Missing dependencies, installing..."
-    pip3 install -r requirements.txt
-    if [ $? -ne 0 ]; then
-        echo "❌ Dependencies installation failed"
-        exit 1
-    fi
-    echo "✅ Dependencies installation completed"
-else
-    echo "✅ All dependencies installed"
-fi
+echo "Kronos Web UI"
+echo "Install dependencies yourself from webui/requirements.txt before starting."
+echo "The server binds to 127.0.0.1 and does not enable the debugger."
+echo "Forecasts are research outputs, not paper orders or portfolio returns."
+echo
 
-# Start application
-echo "🌐 Starting Web server..."
-echo "Access URL: http://localhost:7070"
-echo "Press Ctrl+C to stop server"
-echo ""
-
-python3 app.py
+exec python3 app.py

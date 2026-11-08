@@ -1,9 +1,18 @@
+import os
 import random
 from pathlib import Path
 
+import pytest
+
+if os.environ.get("KRONOS_RUN_WEIGHT_TESTS") != "1":
+    pytest.skip(
+        "Skipped by default so the suite does not download model weights. "
+        "Set KRONOS_RUN_WEIGHT_TESTS=1 to run the pinned-snapshot regression.",
+        allow_module_level=True,
+    )
+
 import numpy as np
 import pandas as pd
-import pytest
 import torch
 from tqdm import tqdm
 

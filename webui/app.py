@@ -1,28 +1,62 @@
 import os
+import sys
+import json
+import logging
+import secrets
+import datetime
+import warnings
+
 import pandas as pd
 import numpy as np
-import json
-import plotly.graph_objects as go
-import plotly.utils
 from flask import Flask, render_template, request, jsonify
-from flask_cors import CORS
-import sys
-import warnings
-import datetime
-warnings.filterwarnings('ignore')
+from werkzeug.exceptions import HTTPException
 
-# Add project root directory to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+warnings.filterwarnings('ignore')
+logger = logging.getLogger("kronos.webui")
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from kronos_safety import (
+    FORECAST_LIMITATION,
+    SafetyError,
+    enforce_inference_budget,
+    limit,
+    list_data_files,
+    loopback_addr,
+    resolve_local_data_file,
+    scrub_text,
+    secrets_equal,
+    text_contains_secret,
+    name_looks_secret,
+    validate_device,
+    webui_runtime_settings,
+    install_log_redactor,
+)
+
+install_log_redactor(logger)
+
+try:
+    import plotly.graph_objects as go
+    import plotly.utils
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
 
 try:
     from model import Kronos, KronosTokenizer, KronosPredictor
     MODEL_AVAILABLE = True
 except ImportError:
     MODEL_AVAILABLE = False
-    print("Warning: Kronos model cannot be imported, will use simulated data for demonstration")
+    logger.warning("Kronos model library is not importable in this process")
 
-app = Flask(__name__)
-CORS(app)
+app = Flask(
+    __name__,
+    template_folder=os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates"),
+)
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
+_UI_TOKEN = None
 
 # Global variables to store models
 tokenizer = None
@@ -35,6 +69,8 @@ AVAILABLE_MODELS = {
         'name': 'Kronos-mini',
         'model_id': 'NeoQuasar/Kronos-mini',
         'tokenizer_id': 'NeoQuasar/Kronos-Tokenizer-2k',
+        'local_model': 'Kronos-mini',
+        'local_tokenizer': 'Kronos-Tokenizer-2k',
         'context_length': 2048,
         'params': '4.1M',
         'description': 'Lightweight model, suitable for fast prediction'
@@ -43,6 +79,8 @@ AVAILABLE_MODELS = {
         'name': 'Kronos-small',
         'model_id': 'NeoQuasar/Kronos-small',
         'tokenizer_id': 'NeoQuasar/Kronos-Tokenizer-base',
+        'local_model': 'Kronos-small',
+        'local_tokenizer': 'Kronos-Tokenizer-base',
         'context_length': 512,
         'params': '24.7M',
         'description': 'Small model, balanced performance and speed'
@@ -51,44 +89,140 @@ AVAILABLE_MODELS = {
         'name': 'Kronos-base',
         'model_id': 'NeoQuasar/Kronos-base',
         'tokenizer_id': 'NeoQuasar/Kronos-Tokenizer-base',
+        'local_model': 'Kronos-base',
+        'local_tokenizer': 'Kronos-Tokenizer-base',
         'context_length': 512,
         'params': '102.3M',
         'description': 'Base model, provides better prediction quality'
     }
 }
 
+def ui_token() -> str:
+    global _UI_TOKEN
+    env_token = os.environ.get("KRONOS_WEBUI_TOKEN", "").strip()
+    if env_token:
+        if len(env_token) < 16:
+            raise SafetyError("weak_token", "KRONOS_WEBUI_TOKEN must be at least 16 characters")
+        return env_token
+    if _UI_TOKEN is None:
+        _UI_TOKEN = secrets.token_urlsafe(32)
+    return _UI_TOKEN
+
+
+def request_authorized() -> bool:
+    if request.headers.get("X-Kronos-Request") != "1":
+        return False
+    token = ui_token()
+    header_token = request.headers.get("X-Kronos-Token", "")
+    cookie_token = request.cookies.get("kronos_session", "")
+    if loopback_addr(request.remote_addr):
+        return secrets_equal(header_token, token) or secrets_equal(cookie_token, token)
+    return secrets_equal(header_token, token)
+
+
+def public_error(exc: Exception, status: int = 400):
+    if isinstance(exc, SafetyError):
+        logger.info("rejected request code=%s", exc.code)
+        return jsonify({"error": exc.code, "limitation": FORECAST_LIMITATION}), status
+    logger.warning("request failed: %s", exc.__class__.__name__)
+    return jsonify({"error": "request_failed", "limitation": FORECAST_LIMITATION}), status
+
+
+@app.errorhandler(Exception)
+def hide_internal_errors(exc):
+    if isinstance(exc, HTTPException):
+        return exc
+    if isinstance(exc, SafetyError):
+        return public_error(exc)
+    logger.warning("unhandled request error: %s", exc.__class__.__name__)
+    return jsonify({"error": "request_failed", "limitation": FORECAST_LIMITATION}), 500
+
+
+@app.before_request
+def guard_request():
+    addr = request.remote_addr or ""
+    nonlocal_ok = os.environ.get("KRONOS_ALLOW_NONLOCAL_BIND") == "1" and len(os.environ.get("KRONOS_WEBUI_TOKEN", "")) >= 16
+    if not loopback_addr(addr) and not nonlocal_ok:
+        return jsonify({"error": "forbidden"}), 403
+    if request.path == "/" and request.method == "GET":
+        return None
+    if request.path.startswith("/api/"):
+        try:
+            if not request_authorized():
+                return jsonify({"error": "unauthorized"}), 401
+        except SafetyError as exc:
+            return public_error(exc, 403)
+        return None
+    return jsonify({"error": "not_found"}), 404
+
+
+@app.after_request
+def harden_response(response):
+    if request.path == "/" and request.method == "GET" and response.status_code == 200:
+        try:
+            response.set_cookie(
+                "kronos_session",
+                ui_token(),
+                httponly=True,
+                samesite="Strict",
+                secure=False,
+                path="/",
+                max_age=8 * 60 * 60,
+            )
+        except SafetyError:
+            logger.warning("UI token was rejected")
+    for header in (
+        "Access-Control-Allow-Origin",
+        "Access-Control-Allow-Credentials",
+        "Access-Control-Allow-Private-Network",
+        "Access-Control-Allow-Headers",
+        "Access-Control-Allow-Methods",
+    ):
+        response.headers.pop(header, None)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; connect-src 'self'; "
+        "img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    )
+    return response
+
+
 def load_data_files():
-    """Scan data directory and return available data files"""
-    data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
-    data_files = []
-    
-    if os.path.exists(data_dir):
-        for file in os.listdir(data_dir):
-            if file.endswith(('.csv', '.feather')):
-                file_path = os.path.join(data_dir, file)
-                file_size = os.path.getsize(file_path)
-                data_files.append({
-                    'name': file,
-                    'path': file_path,
-                    'size': f"{file_size / 1024:.1f} KB" if file_size < 1024*1024 else f"{file_size / (1024*1024):.1f} MB"
-                })
-    
-    return data_files
+    """Scan the confined data directory and return file names only."""
+    try:
+        return list_data_files()
+    except SafetyError:
+        return []
 
 def load_data_file(file_path):
-    """Load data file"""
+    """Load a CSV or Feather file from the confined data directory."""
     try:
-        if file_path.endswith('.csv'):
-            df = pd.read_csv(file_path)
-        elif file_path.endswith('.feather'):
-            df = pd.read_feather(file_path)
+        resolved = resolve_local_data_file(file_path)
+        max_rows = limit("max_rows")
+        if resolved.suffix.lower() == ".csv":
+            df = pd.read_csv(resolved, nrows=max_rows + 1)
+        elif resolved.suffix.lower() == ".feather":
+            df = pd.read_feather(resolved)
         else:
-            return None, "Unsupported file format"
+            raise SafetyError("unsupported_type", "only .csv and .feather files are allowed")
+        if len(df) > max_rows:
+            raise SafetyError("too_many_rows", "data file exceeds the engineering row limit")
+        secret_columns = [column for column in df.columns if text_contains_secret(str(column)) or name_looks_secret(str(column))]
+        if secret_columns:
+            df = df.drop(columns=secret_columns)
+        for column in list(df.columns):
+            if df[column].dtype == object:
+                mask = df[column].astype(str).map(text_contains_secret)
+                if mask.any():
+                    df.loc[mask, column] = pd.NA
         
         # Check required columns
         required_cols = ['open', 'high', 'low', 'close']
         if not all(col in df.columns for col in required_cols):
-            return None, f"Missing required columns: {required_cols}"
+            return None, SafetyError("invalid_columns", "data file is missing required price columns")
         
         # Process timestamp column
         if 'timestamps' in df.columns:
@@ -118,9 +252,12 @@ def load_data_file(file_path):
         df = df.dropna()
         
         return df, None
-        
-    except Exception as e:
-        return None, f"Failed to load file: {str(e)}"
+
+    except SafetyError as exc:
+        return None, exc
+    except Exception:
+        logger.warning("data file could not be parsed")
+        return None, SafetyError("unreadable_data", "data file could not be read")
 
 def save_prediction_results(file_path, prediction_type, prediction_results, actual_data, input_data, prediction_params):
     """Save prediction results to file"""
@@ -195,19 +332,25 @@ def save_prediction_results(file_path, prediction_type, prediction_results, actu
                     }
                 }
         
-        # Save to file
+        # Save to file after scrubbing secret-like strings from the payload.
+        rendered = scrub_text(json.dumps(save_data, ensure_ascii=True))
+        if text_contains_secret(rendered):
+            logger.warning("prediction export dropped because it still contained secret-like material")
+            return None
         with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(save_data, f, indent=2, ensure_ascii=False)
+            f.write(rendered)
         
-        print(f"Prediction results saved to: {filepath}")
+        logger.info("prediction results saved")
         return filepath
         
-    except Exception as e:
-        print(f"Failed to save prediction results: {e}")
+    except Exception:
+        logger.warning("prediction results were not saved")
         return None
 
 def create_prediction_chart(df, pred_df, lookback, pred_len, actual_df=None, historical_start_idx=0):
-    """Create prediction chart"""
+    """Create prediction chart when Plotly is installed. The browser does not load a CDN."""
+    if not PLOTLY_AVAILABLE:
+        return None
     # Use specified historical data start position, not always from the beginning of df
     if historical_start_idx + lookback + pred_len <= len(df):
         # Display lookback historical points + pred_len prediction points starting from specified position
@@ -342,15 +485,17 @@ def get_data_files():
 def load_data():
     """Load data file"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return public_error(SafetyError("invalid_json", "invalid request"))
         file_path = data.get('file_path')
         
         if not file_path:
-            return jsonify({'error': 'File path cannot be empty'}), 400
+            return public_error(SafetyError("invalid_data_path", "invalid data path"))
         
         df, error = load_data_file(file_path)
         if error:
-            return jsonify({'error': error}), 400
+            return public_error(error if isinstance(error, SafetyError) else SafetyError("unreadable_data", "data file could not be read"))
         
         # Detect data time frequency
         def detect_timeframe(df):
@@ -395,36 +540,49 @@ def load_data():
         return jsonify({
             'success': True,
             'data_info': data_info,
-            'message': f'Successfully loaded data, total {len(df)} rows'
+            'message': f'Successfully loaded data, total {len(df)} rows',
+            'limitation': FORECAST_LIMITATION,
         })
         
-    except Exception as e:
-        return jsonify({'error': f'Failed to load data: {str(e)}'}), 500
+    except SafetyError as exc:
+        return public_error(exc)
+    except Exception as exc:
+        return public_error(exc)
 
 @app.route('/api/predict', methods=['POST'])
 def predict():
     """Perform prediction"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return public_error(SafetyError("invalid_json", "invalid request"))
         file_path = data.get('file_path')
-        lookback = int(data.get('lookback', 400))
-        pred_len = int(data.get('pred_len', 120))
-        
-        # Get prediction quality parameters
-        temperature = float(data.get('temperature', 1.0))
-        top_p = float(data.get('top_p', 0.9))
-        sample_count = int(data.get('sample_count', 1))
+        try:
+            budget = enforce_inference_budget(
+                lookback=data.get('lookback', 400),
+                pred_len=data.get('pred_len', 120),
+                sample_count=data.get('sample_count', 1),
+                temperature=data.get('temperature', 1.0),
+                top_p=data.get('top_p', 0.9),
+            )
+        except SafetyError as exc:
+            return public_error(exc)
+        lookback = budget["lookback"]
+        pred_len = budget["pred_len"]
+        temperature = budget["temperature"]
+        top_p = budget["top_p"]
+        sample_count = budget["sample_count"]
         
         if not file_path:
-            return jsonify({'error': 'File path cannot be empty'}), 400
+            return public_error(SafetyError("invalid_data_path", "invalid data path"))
         
         # Load data
         df, error = load_data_file(file_path)
         if error:
-            return jsonify({'error': error}), 400
+            return public_error(error if isinstance(error, SafetyError) else SafetyError("unreadable_data", "data file could not be read"))
         
         if len(df) < lookback:
-            return jsonify({'error': f'Insufficient data length, need at least {lookback} rows'}), 400
+            return public_error(SafetyError("insufficient_rows", "not enough rows for the requested lookback"))
         
         # Perform prediction
         if MODEL_AVAILABLE and predictor is not None:
@@ -448,7 +606,7 @@ def predict():
                     
                     # Ensure sufficient data: lookback + pred_len
                     if len(time_range_df) < lookback + pred_len:
-                        return jsonify({'error': f'Insufficient data from start time {start_dt.strftime("%Y-%m-%d %H:%M")}, need at least {lookback + pred_len} data points, currently only {len(time_range_df)} available'}), 400
+                        return public_error(SafetyError("insufficient_rows", "not enough rows in the selected window"))
                     
                     # Use first lookback data points within selected window for prediction
                     x_df = time_range_df.iloc[:lookback][required_cols]
@@ -487,9 +645,10 @@ def predict():
                 )
                 
             except Exception as e:
-                return jsonify({'error': f'Kronos model prediction failed: {str(e)}'}), 500
+                logger.warning("prediction failed: %s", e.__class__.__name__)
+                return public_error(SafetyError("prediction_failed", "prediction failed"))
         else:
-            return jsonify({'error': 'Kronos model not loaded, please load model first'}), 400
+            return public_error(SafetyError("model_not_loaded", "load a local model before predicting"))
         
         # Prepare actual data for comparison (if exists)
         actual_data = []
@@ -545,7 +704,13 @@ def predict():
             # Latest data: start from beginning
             historical_start_idx = 0
         
-        chart_json = create_prediction_chart(df, pred_df, lookback, pred_len, actual_df, historical_start_idx)
+        chart_json = None
+        if PLOTLY_AVAILABLE:
+            try:
+                chart_json = create_prediction_chart(df, pred_df, lookback, pred_len, actual_df, historical_start_idx)
+            except Exception:
+                logger.warning("chart generation skipped")
+                chart_json = None
         
         # Prepare prediction result data - fix timestamp calculation logic
         if 'timestamps' in df.columns:
@@ -617,11 +782,14 @@ def predict():
             'prediction_results': prediction_results,
             'actual_data': actual_data,
             'has_comparison': len(actual_data) > 0,
-            'message': f'Prediction completed, generated {pred_len} prediction points' + (f', including {len(actual_data)} actual data points for comparison' if len(actual_data) > 0 else '')
+            'message': f'Prediction completed, generated {pred_len} prediction points' + (f', including {len(actual_data)} actual data points for comparison' if len(actual_data) > 0 else ''),
+            'limitation': FORECAST_LIMITATION,
         })
         
-    except Exception as e:
-        return jsonify({'error': f'Prediction failed: {str(e)}'}), 500
+    except SafetyError as exc:
+        return public_error(exc)
+    except Exception as exc:
+        return public_error(exc)
 
 @app.route('/api/load-model', methods=['POST'])
 def load_model():
@@ -629,21 +797,28 @@ def load_model():
     global tokenizer, model, predictor
     
     try:
-        if not MODEL_AVAILABLE:
-            return jsonify({'error': 'Kronos model library not available'}), 400
-        
-        data = request.get_json()
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return public_error(SafetyError("invalid_json", "invalid request"))
         model_key = data.get('model_key', 'kronos-small')
-        device = data.get('device', 'cpu')
+        device = validate_device(data.get('device', 'cpu'))
+        if not MODEL_AVAILABLE:
+            return public_error(SafetyError("model_unavailable", "model library is not available"))
         
         if model_key not in AVAILABLE_MODELS:
-            return jsonify({'error': f'Unsupported model: {model_key}'}), 400
+            return public_error(SafetyError("unknown_model", "unknown model"))
         
         model_config = AVAILABLE_MODELS[model_key]
-        
-        # Load tokenizer and model
-        tokenizer = KronosTokenizer.from_pretrained(model_config['tokenizer_id'])
-        model = Kronos.from_pretrained(model_config['model_id'])
+        model_root = os.environ.get("KRONOS_MODEL_DIR", os.path.join(_ROOT, "pretrained"))
+        if os.environ.get("KRONOS_ALLOW_HUB_DOWNLOAD") == "1":
+            tokenizer_source = model_config['tokenizer_id']
+            model_source = model_config['model_id']
+        else:
+            tokenizer_source = os.path.join(model_root, model_config['local_tokenizer'])
+            model_source = os.path.join(model_root, model_config['local_model'])
+
+        tokenizer = KronosTokenizer.from_pretrained(tokenizer_source)
+        model = Kronos.from_pretrained(model_source)
         
         # Create predictor
         predictor = KronosPredictor(model, tokenizer, device=device, max_context=model_config['context_length'])
@@ -656,11 +831,14 @@ def load_model():
                 'params': model_config['params'],
                 'context_length': model_config['context_length'],
                 'description': model_config['description']
-            }
+            },
+            'limitation': FORECAST_LIMITATION,
         })
         
-    except Exception as e:
-        return jsonify({'error': f'Model loading failed: {str(e)}'}), 500
+    except SafetyError as exc:
+        return public_error(exc)
+    except Exception as exc:
+        return public_error(exc)
 
 @app.route('/api/available-models')
 def get_available_models():
@@ -697,12 +875,21 @@ def get_model_status():
             'message': 'Kronos model library not available, please install related dependencies'
         })
 
+def main():
+    settings = webui_runtime_settings()
+    shown_host = "127.0.0.1" if settings["host"] in {"127.0.0.1", "::1"} else settings["host"]
+    print("Starting Kronos Web UI")
+    print(f"Open http://{shown_host}:{settings['port']} from this machine")
+    print(FORECAST_LIMITATION)
+    print("The debugger is disabled. Hub download stays off unless KRONOS_ALLOW_HUB_DOWNLOAD=1 was set before startup.")
+    app.run(
+        host=settings["host"],
+        port=settings["port"],
+        debug=False,
+        use_reloader=False,
+        load_dotenv=False,
+    )
+
+
 if __name__ == '__main__':
-    print("Starting Kronos Web UI...")
-    print(f"Model availability: {MODEL_AVAILABLE}")
-    if MODEL_AVAILABLE:
-        print("Tip: You can load Kronos model through /api/load-model endpoint")
-    else:
-        print("Tip: Will use simulated data for demonstration")
-    
-    app.run(debug=True, host='0.0.0.0', port=7070)
+    main()

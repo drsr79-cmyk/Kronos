@@ -92,6 +92,28 @@ We release a family of pre-trained models with varying capacities to suit differ
 pip install -r requirements.txt
 ```
 
+### Safe local use
+
+Kronos is an offline forecasting library by default. It is not a broker and not a paper-trading simulator.
+
+- Load models from a local directory that contains `config.json` and `model.safetensors`. `pytorch_model.bin` is refused.
+- Hub downloads stay off unless you set `KRONOS_ALLOW_HUB_DOWNLOAD=1` before starting Python. Reviewed repo ids then use a pinned commit.
+- `HF_HUB_DISABLE_TELEMETRY` is set by the loader. Comet logging stays off unless `KRONOS_ALLOW_COMET=1` and `COMET_API_KEY` are set in the environment. Keys are not stored in this repo.
+- Pickle dataset loads stay off unless `KRONOS_ALLOW_PICKLE=1`.
+- The web UI binds to `127.0.0.1`, disables the debugger, and does not install packages or load CDN scripts. API calls require the local session cookie plus `X-Kronos-Request: 1`.
+- Lookback, prediction length, sample count, file size, and batch size have engineering ceilings. Those ceilings are memory guards, not investment policy.
+- A forecast is not a paper order, a paper trade, or a portfolio return. There is no promise of profit or of winning.
+- `offline_worker.py` reads sanitized local CSV snapshots and does not take market-data API keys. `ingestion_gate.py` refuses market-data fetches; ingestion is not deployed.
+- In-process socket blocking is not OS-enforced network isolation. A firewall, network namespace, or offline container is a separate deployment control.
+- Learning code must not replace `kronos_safety.py`, the offline worker, the ingestion gate, or the active model and web UI modules.
+
+```python
+from model import Kronos, KronosTokenizer, KronosPredictor
+
+tokenizer = KronosTokenizer.from_pretrained("/path/to/Kronos-Tokenizer-base")
+model = Kronos.from_pretrained("/path/to/Kronos-small")
+```
+
 ### 📈 Making Forecasts
 
 Forecasting with Kronos is straightforward using the `KronosPredictor` class. It handles data preprocessing, normalization, prediction, and inverse normalization, allowing you to get from raw data to forecasts in just a few lines of code.
@@ -102,14 +124,13 @@ Here is a step-by-step guide to making your first forecast.
 
 #### 1. Load the Tokenizer and Model
 
-First, load a pre-trained Kronos model and its corresponding tokenizer from the Hugging Face Hub.
+First, load a local safetensors snapshot. A reviewed Hub id works only when `KRONOS_ALLOW_HUB_DOWNLOAD=1` was set before import; the loader pins the reviewed commit.
 
 ```python
 from model import Kronos, KronosTokenizer, KronosPredictor
 
-# Load from Hugging Face Hub
-tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
-model = Kronos.from_pretrained("NeoQuasar/Kronos-small")
+tokenizer = KronosTokenizer.from_pretrained("/path/to/Kronos-Tokenizer-base")
+model = Kronos.from_pretrained("/path/to/Kronos-small")
 ```
 
 #### 2. Instantiate the Predictor

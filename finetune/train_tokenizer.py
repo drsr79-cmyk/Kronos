@@ -12,10 +12,11 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-import comet_ml
-
-# Ensure project root is in path
-sys.path.append("../")
+# Ensure project root is in path, independent of the current directory.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from kronos_safety import comet_experiment_kwargs, redact_mapping
 from config import Config
 from dataset import QlibDataset
 from model.kronos import KronosTokenizer
@@ -235,15 +236,16 @@ def main(config: dict):
             'world_size': world_size,
         }
         if config['use_comet']:
-            comet_logger = comet_ml.Experiment(
-                api_key=config['comet_config']['api_key'],
-                project_name=config['comet_config']['project_name'],
-                workspace=config['comet_config']['workspace'],
-            )
-            comet_logger.add_tag(config['comet_tag'])
-            comet_logger.set_name(config['comet_name'])
-            comet_logger.log_parameters(config)
-            print("Comet Logger Initialized.")
+            comet_kwargs = comet_experiment_kwargs(config['comet_config'])
+            if comet_kwargs is None:
+                print("Comet logging skipped. Set KRONOS_ALLOW_COMET=1, COMET_API_KEY, COMET_PROJECT_NAME, and COMET_WORKSPACE.")
+            else:
+                import comet_ml
+                comet_logger = comet_ml.Experiment(**comet_kwargs)
+                comet_logger.add_tag(config['comet_tag'])
+                comet_logger.set_name(config['comet_name'])
+                comet_logger.log_parameters(redact_mapping(config))
+                print("Comet Logger Initialized.")
 
     dist.barrier()  # Ensure save directory is created before proceeding
 

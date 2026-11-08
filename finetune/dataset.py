@@ -1,9 +1,15 @@
-import pickle
+import os
+import sys
 import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 from config import Config
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from kronos_safety import load_pickle
 
 
 class QlibDataset(Dataset):
@@ -38,8 +44,7 @@ class QlibDataset(Dataset):
             self.data_path = f"{self.config.dataset_path}/val_data.pkl"
             self.n_samples = self.config.n_val_iter
 
-        with open(self.data_path, 'rb') as f:
-            self.data = pickle.load(f)
+        self.data = load_pickle(self.data_path)
 
         self.window = self.config.lookback_window + self.config.predict_window + 1
 

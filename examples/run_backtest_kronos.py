@@ -3,8 +3,14 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import sys
 from datetime import datetime, timedelta
 import warnings
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from kronos_safety import safe_named_file
 
 warnings.filterwarnings('ignore')
 
@@ -36,7 +42,7 @@ class KronosBacktester:
         """
         加载历史数据
         """
-        csv_file = os.path.join(self.data_dir, f"{stock_code}_stock_data.csv")
+        csv_file = str(safe_named_file(self.data_dir, stock_code, "", "_stock_data.csv"))
         if not os.path.exists(csv_file):
             raise FileNotFoundError(f"数据文件不存在: {csv_file}")
 
@@ -73,9 +79,9 @@ class KronosBacktester:
         """
         # 尝试不同的预测文件命名
         pred_files = [
-            os.path.join(self.model_dir, f"{stock_code}_kronos_predictions.csv"),
-            os.path.join(self.model_dir, f"{stock_code}_detailed_predictions.csv"),
-            os.path.join(self.model_dir, f"{stock_code}_predictions.csv")
+            str(safe_named_file(self.model_dir, stock_code, "", "_kronos_predictions.csv")),
+            str(safe_named_file(self.model_dir, stock_code, "", "_detailed_predictions.csv")),
+            str(safe_named_file(self.model_dir, stock_code, "", "_predictions.csv")),
         ]
 
         pred_df = None
@@ -350,7 +356,7 @@ class KronosBacktester:
 
         # 保存图表
         os.makedirs(output_dir, exist_ok=True)
-        chart_file = os.path.join(output_dir, f'{stock_code}_backtest_results.png')
+        chart_file = str(safe_named_file(output_dir, stock_code, "", "_backtest_results.png"))
         plt.savefig(chart_file, dpi=300, bbox_inches='tight')
         print(f"📊 回测图表已保存: {chart_file}")
 

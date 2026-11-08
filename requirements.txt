@@ -1,10 +1,12 @@
-numpy
-pandas
-torch>=2.0.0
+# Reviewed pins as of 2026-11-08. torch is a floor, not an exact wheel:
+# CVE-2025-32434 is fixed in torch 2.6.0. Later torch advisories may still apply
+# to APIs this repository does not call. Do not treat this file as a full lock.
+numpy==1.26.4
+pandas==2.2.2
+torch>=2.6.0
 
 einops==0.8.1
 huggingface_hub==0.33.1
 matplotlib==3.9.3
-pandas==2.2.2
 tqdm==4.67.1
 safetensors==0.6.2

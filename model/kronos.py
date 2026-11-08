@@ -1,16 +1,40 @@
+import os
+import sys
+
+# Telemetry and Hub downloads are decided before huggingface_hub reads its env.
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+os.environ["DISABLE_TELEMETRY"] = "1"
+os.environ["DO_NOT_TRACK"] = "1"
+if os.environ.get("KRONOS_ALLOW_HUB_DOWNLOAD") != "1":
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 import numpy as np
 import pandas as pd
 import torch
 from huggingface_hub import PyTorchModelHubMixin
-import sys
 
 from tqdm import trange
 
-sys.path.append("../")
-from model.module import *
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from kronos_safety import SafetyError, enforce_inference_budget, prepare_pretrained_load
+from .module import *
 
 
-class KronosTokenizer(nn.Module, PyTorchModelHubMixin):
+class _SafePretrained:
+    """Require a local safetensors directory, or an explicitly enabled reviewed Hub commit."""
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        pretrained_model_name_or_path, kwargs = prepare_pretrained_load(
+            pretrained_model_name_or_path, kwargs
+        )
+        return super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+
+
+class KronosTokenizer(_SafePretrained, nn.Module, PyTorchModelHubMixin):
     """
     KronosTokenizer module for tokenizing input data using a hybrid quantization approach.
 
@@ -177,7 +201,7 @@ class KronosTokenizer(nn.Module, PyTorchModelHubMixin):
         return z
 
 
-class Kronos(nn.Module, PyTorchModelHubMixin):
+class Kronos(_SafePretrained, nn.Module, PyTorchModelHubMixin):
     """
     Kronos Model.
 
@@ -387,6 +411,17 @@ def sample_from_logits(logits, temperature=1.0, top_k=None, top_p=None, sample_l
 
 
 def auto_regressive_inference(tokenizer, model, x, x_stamp, y_stamp, max_context, pred_len, clip=5, T=1.0, top_k=0, top_p=0.99, sample_count=5, verbose=False):
+    try:
+        enforce_inference_budget(
+            lookback=int(x.shape[1]),
+            pred_len=pred_len,
+            sample_count=sample_count,
+            temperature=T,
+            top_p=top_p,
+            batch_size=int(x.shape[0]),
+        )
+    except SafetyError:
+        raise
     with torch.no_grad():
         x = torch.clip(x, -clip, clip)
 
@@ -520,6 +555,14 @@ class KronosPredictor:
 
         if not isinstance(df, pd.DataFrame):
             raise ValueError("Input must be a pandas DataFrame.")
+        enforce_inference_budget(
+            lookback=int(len(df)),
+            pred_len=pred_len,
+            sample_count=sample_count,
+            temperature=T,
+            top_p=top_p,
+            batch_size=1,
+        )
 
         if not all(col in df.columns for col in self.price_cols):
             raise ValueError(f"Price columns {self.price_cols} not found in DataFrame.")
@@ -644,11 +687,21 @@ class KronosPredictor:
             raise ValueError(f"Parallel prediction requires all series to have consistent historical lengths, got: {seq_lens}")
         if len(set(y_lens)) != 1:
             raise ValueError(f"Parallel prediction requires all series to have consistent prediction lengths, got: {y_lens}")
+        if not seq_lens:
+            raise ValueError("Parallel prediction requires at least one series.")
 
         x_batch = np.stack(x_list, axis=0).astype(np.float32)           # (B, seq_len, feat)
         x_stamp_batch = np.stack(x_stamp_list, axis=0).astype(np.float32) # (B, seq_len, time_feat)
         y_stamp_batch = np.stack(y_stamp_list, axis=0).astype(np.float32) # (B, pred_len, time_feat)
 
+        enforce_inference_budget(
+            lookback=int(seq_lens[0]),
+            pred_len=pred_len,
+            sample_count=sample_count,
+            temperature=T,
+            top_p=top_p,
+            batch_size=num_series,
+        )
         preds = self.generate(x_batch, x_stamp_batch, y_stamp_batch, pred_len, T, top_k, top_p, sample_count, verbose)
         # preds: (B, pred_len, feat)
 
