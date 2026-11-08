@@ -19,8 +19,11 @@ from qlib.contrib.strategy import TopkDropoutStrategy
 from qlib.utils import flatten_dict
 from qlib.utils.time import Freq
 
-# Ensure project root is in the Python path
-sys.path.append("../")
+# Ensure project root is in the Python path, independent of the current directory.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from kronos_safety import load_pickle
 from config import Config
 from model.kronos import Kronos, KronosTokenizer, auto_regressive_inference
 
@@ -334,8 +337,7 @@ def main():
     # --- 2. Load Data ---
     test_data_path = os.path.join(run_config['data_path'], "test_data.pkl")
     print(f"Loading test data from {test_data_path}...")
-    with open(test_data_path, 'rb') as f:
-        test_data = pickle.load(f)
+    test_data = load_pickle(test_data_path)
     print(test_data)
     # --- 3. Generate Predictions ---
     model_preds = generate_predictions(run_config, test_data)
@@ -349,8 +351,7 @@ def main():
         pickle.dump(model_preds, f)
 
     # --- 5. Run Backtesting ---
-    with open(predictions_file, 'rb') as f:
-        model_preds = pickle.load(f)
+    model_preds = load_pickle(predictions_file)
 
     backtester = QlibBacktest(base_config)
     backtester.run_and_plot_results(model_preds)

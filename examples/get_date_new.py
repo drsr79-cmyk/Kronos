@@ -3,8 +3,14 @@ import requests
 import json
 from datetime import datetime, timedelta
 import os
+import sys
 import time
 import random
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from kronos_safety import safe_named_file
 
 
 def get_stock_market(stock_code):
@@ -572,7 +578,7 @@ def save_all_history_stock_data(df, stock_code, save_dir="D:/lianghuajiaoyi/Kron
         os.makedirs(save_dir, exist_ok=True)
 
         # 保存CSV文件 - 使用全历史命名
-        csv_file = os.path.join(save_dir, f"{stock_code}_all_history.csv")
+        csv_file = str(safe_named_file(save_dir, stock_code, "", "_all_history.csv"))
 
         # 重置索引以便保存日期列
         df_reset = df.reset_index()
@@ -584,7 +590,7 @@ def save_all_history_stock_data(df, stock_code, save_dir="D:/lianghuajiaoyi/Kron
         years = df_reset['日期'].dt.year.unique()
         for year in years:
             year_data = df_reset[df_reset['日期'].dt.year == year]
-            year_file = os.path.join(save_dir, f"{stock_code}_{year}.csv")
+            year_file = str(safe_named_file(save_dir, stock_code, "", f"_{int(year)}.csv"))
             year_data.to_csv(year_file, encoding='utf-8-sig', index=False)
 
         print(f"📁 同时保存了 {len(years)} 个年份的单独数据文件")
@@ -609,11 +615,8 @@ def main_all_history(stock_code="002354"):
         import requests
         import numpy as np
     except ImportError:
-        print("正在安装必要库...")
-        import subprocess
-        subprocess.check_call(["pip", "install", "requests", "numpy", "pandas"])
-        import requests
-        import numpy as np
+        print("Missing requests or numpy. Install pinned dependencies from requirements.txt and retry.")
+        return
 
     # 获取全历史数据（多数据源）
     stock_data = get_stock_data_with_retry_all_history(stock_code)
@@ -631,7 +634,7 @@ def main_all_history(stock_code="002354"):
         print(f"总交易天数: {len(stock_data):,}")
 
         # 显示保存的文件
-        csv_file = os.path.join(save_directory, f"{stock_code}_all_history.csv")
+        csv_file = str(safe_named_file(save_directory, stock_code, "", "_all_history.csv"))
         if os.path.exists(csv_file):
             file_size = os.path.getsize(csv_file) / 1024  # KB
             print(f"📄 生成的文件: {csv_file} ({file_size:.1f} KB)")

@@ -28,7 +28,10 @@ import pandas as pd
 import akshare as ak
 import matplotlib.pyplot as plt
 import sys
-sys.path.append("../")
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from kronos_safety import safe_named_file, safe_symbol
 from model import Kronos, KronosTokenizer, KronosPredictor
 
 save_dir = "./outputs"
@@ -150,7 +153,7 @@ def plot_result(df_hist, df_pred, symbol):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plot_path = os.path.join(save_dir, f"pred_{symbol.replace('.', '_')}_chart.png")
+    plot_path = str(safe_named_file(save_dir, safe_symbol(symbol), "pred_", "_chart.png"))
     plt.savefig(plot_path)
     plt.close()
     print(f"📊 Chart saved: {plot_path}")
@@ -190,7 +193,7 @@ def predict_future(symbol):
     ]).reset_index(drop=True)
 
     # Save CSV
-    out_file = os.path.join(save_dir, f"pred_{symbol.replace('.', '_')}_data.csv")
+    out_file = str(safe_named_file(save_dir, safe_symbol(symbol), "pred_", "_data.csv"))
     df_out.to_csv(out_file, index=False)
     print(f"✅ Prediction completed and saved: {out_file}")
 

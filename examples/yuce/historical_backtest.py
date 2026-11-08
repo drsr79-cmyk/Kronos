@@ -3,8 +3,14 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import sys
 from datetime import datetime, timedelta
 import warnings
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from kronos_safety import safe_named_file
 
 warnings.filterwarnings('ignore')
 
@@ -24,7 +30,7 @@ class HistoricalBacktester:
 
     def load_historical_data(self, stock_code):
         """加载历史数据"""
-        csv_file = os.path.join(self.data_dir, f"{stock_code}_stock_data.csv")
+        csv_file = str(safe_named_file(self.data_dir, stock_code, "", "_stock_data.csv"))
         if not os.path.exists(csv_file):
             raise FileNotFoundError(f"数据文件不存在: {csv_file}")
 
@@ -255,7 +261,7 @@ class HistoricalBacktester:
 
         # 保存图表
         os.makedirs(output_dir, exist_ok=True)
-        chart_file = os.path.join(output_dir, f'{stock_code}_historical_backtest.png')
+        chart_file = str(safe_named_file(output_dir, stock_code, "", "_historical_backtest.png"))
         plt.savefig(chart_file, dpi=300, bbox_inches='tight')
         print(f"📊 历史回测图表已保存: {chart_file}")
 

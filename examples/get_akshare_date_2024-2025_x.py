@@ -3,8 +3,14 @@ import requests
 import json
 from datetime import datetime, timedelta
 import os
+import sys
 import time
 import random
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from kronos_safety import safe_named_file
 
 
 def get_stock_market(stock_code):
@@ -549,7 +555,7 @@ def save_stock_data(df, stock_code, save_dir="D:/lianghuajiaoyi/Kronos/examples/
         os.makedirs(save_dir, exist_ok=True)
 
         # 保存CSV文件
-        csv_file = os.path.join(save_dir, f"{stock_code}_stock_data.csv")
+        csv_file = str(safe_named_file(save_dir, stock_code, "", "_stock_data.csv"))
 
         # 重置索引以便保存日期列
         df_reset = df.reset_index()
@@ -577,11 +583,8 @@ def main(stock_code="002354", start_year=2024, end_year=2025):
         import requests
         import numpy as np
     except ImportError:
-        print("正在安装必要库...")
-        import subprocess
-        subprocess.check_call(["pip", "install", "requests", "numpy", "pandas"])
-        import requests
-        import numpy as np
+        print("Missing requests or numpy. Install pinned dependencies from requirements.txt and retry.")
+        return
 
     # 获取数据（多数据源）
     stock_data = get_stock_data_with_retry(stock_code, start_year, end_year)
@@ -597,7 +600,7 @@ def main(stock_code="002354", start_year=2024, end_year=2025):
         print(f"最新数据日期: {stock_data.index.max().strftime('%Y-%m-%d')}")
 
         # 显示保存的文件
-        csv_file = os.path.join(save_directory, f"{stock_code}_stock_data.csv")
+        csv_file = str(safe_named_file(save_directory, stock_code, "", "_stock_data.csv"))
         if os.path.exists(csv_file):
             file_size = os.path.getsize(csv_file) / 1024  # KB
             print(f"📄 生成的文件: {csv_file} ({file_size:.1f} KB)")
