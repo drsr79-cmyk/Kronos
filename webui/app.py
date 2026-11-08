@@ -26,10 +26,16 @@ from kronos_safety import (
     list_data_files,
     loopback_addr,
     resolve_local_data_file,
+    scrub_text,
     secrets_equal,
+    text_contains_secret,
+    name_looks_secret,
     validate_device,
     webui_runtime_settings,
+    install_log_redactor,
 )
+
+install_log_redactor(logger)
 
 try:
     import plotly.graph_objects as go
@@ -204,6 +210,14 @@ def load_data_file(file_path):
             raise SafetyError("unsupported_type", "only .csv and .feather files are allowed")
         if len(df) > max_rows:
             raise SafetyError("too_many_rows", "data file exceeds the engineering row limit")
+        secret_columns = [column for column in df.columns if text_contains_secret(str(column)) or name_looks_secret(str(column))]
+        if secret_columns:
+            df = df.drop(columns=secret_columns)
+        for column in list(df.columns):
+            if df[column].dtype == object:
+                mask = df[column].astype(str).map(text_contains_secret)
+                if mask.any():
+                    df.loc[mask, column] = pd.NA
         
         # Check required columns
         required_cols = ['open', 'high', 'low', 'close']
@@ -318,15 +332,19 @@ def save_prediction_results(file_path, prediction_type, prediction_results, actu
                     }
                 }
         
-        # Save to file
+        # Save to file after scrubbing secret-like strings from the payload.
+        rendered = scrub_text(json.dumps(save_data, ensure_ascii=True))
+        if text_contains_secret(rendered):
+            logger.warning("prediction export dropped because it still contained secret-like material")
+            return None
         with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(save_data, f, indent=2, ensure_ascii=False)
+            f.write(rendered)
         
-        print(f"Prediction results saved to: {filepath}")
+        logger.info("prediction results saved")
         return filepath
         
-    except Exception as e:
-        print(f"Failed to save prediction results: {e}")
+    except Exception:
+        logger.warning("prediction results were not saved")
         return None
 
 def create_prediction_chart(df, pred_df, lookback, pred_len, actual_df=None, historical_start_idx=0):

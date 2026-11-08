@@ -127,6 +127,22 @@ def test_predict_bounds_and_private_network_preflight(ui):
     assert "Access-Control-Allow-Origin" not in preflight.headers
 
 
+def test_secret_column_does_not_reach_the_response(ui):
+    _module, client, data = ui
+    canary = "CANARY_MARKET_KEY_do-not-ship-7f3a"
+    (data / "bars.csv").write_text(
+        "open,high,low,close,api_key\n1,2,0.5,1.5," + canary + "\n1.1,2.1,0.6,1.6," + canary + "\n1.2,2.2,0.7,1.7," + canary + "\n",
+        encoding="utf-8",
+    )
+    headers = _authorize(client)
+    response = client.post("/api/load-data", json={"file_path": "bars.csv"}, headers=headers)
+    body = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert canary not in body
+    assert "api_key" not in response.get_json()["data_info"]["columns"]
+    assert "no promise of profit" in response.get_json()["limitation"]
+
+
 def test_model_endpoint_does_not_download(ui, monkeypatch):
     _module, client, _data = ui
     headers = _authorize(client)

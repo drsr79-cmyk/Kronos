@@ -3,8 +3,8 @@
 prediction_cn_markets_day.py
 
 Description:
-    Predicts future daily K-line (1D) data for A-share markets using Kronos model and akshare.
-    The script automatically downloads the latest historical data, cleans it, and runs model inference.
+    Predicts from a local CSV snapshot. Market-data download is not deployed.
+    Network clients such as akshare are disabled in this tree.
 
 Usage:
     python prediction_cn_markets_day.py --symbol 000001
@@ -25,7 +25,12 @@ import os
 import argparse
 import time
 import pandas as pd
-import akshare as ak
+class _MarketIngestionDisabled:
+    def __getattr__(self, _name):
+        from ingestion_gate import refuse_market_ingestion
+        refuse_market_ingestion("akshare")
+
+ak = _MarketIngestionDisabled()
 import matplotlib.pyplot as plt
 import sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

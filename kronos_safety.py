@@ -16,8 +16,39 @@ from pathlib import Path
 
 FORECAST_LIMITATION = (
     "Research forecast only. This output is not a paper order, "
-    "a paper trade, or a portfolio return."
+    "a paper trade, or a portfolio return. There is no promise of profit or of winning."
 )
+NO_WIN_PROMISE = "No promise of profit or of winning."
+# Python-level socket patches apply only inside this interpreter.
+# They are not an OS network namespace, seccomp filter, firewall, or container egress policy.
+ISOLATION_BOUNDARY = (
+    "Python network blocking is in-process only. "
+    "OS-enforced deployment isolation is a separate control and is not provided by this repository."
+)
+SECRET_ENV_NAMES = (
+    "COMET_API_KEY",
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "KRONOS_WEBUI_TOKEN",
+    "MARKET_DATA_API_KEY",
+    "EASTMONEY_UT",
+    "AKSHARE_TOKEN",
+    "API_KEY",
+    "API_SECRET",
+)
+ACTIVE_POLICY_FILES = frozenset(
+    {
+        "kronos_safety.py",
+        "offline_worker.py",
+        "ingestion_gate.py",
+        "model/kronos.py",
+        "webui/app.py",
+    }
+)
+_SECRET_FIELD_RE = re.compile(
+    r"(?i)\b(api[_-]?key|api[_-]?secret|access[_-]?token|secret|password|bearer|eastmoney[_-]?ut)\b\s*[:=]\s*\S+"
+)
+_CANARY_RE = re.compile(r"CANARY_[A-Za-z0-9_-]{4,}")
 
 # Reviewed Hub commits observed for NeoQuasar Kronos artifacts.
 # Hub download stays off unless a process sets KRONOS_ALLOW_HUB_DOWNLOAD=1
@@ -154,6 +185,8 @@ def resolve_local_data_file(user_path: str, root: Path | None = None) -> Path:
         raise SafetyError("invalid_data_path", "data path is not a file")
     if current.suffix.lower() not in {".csv", ".feather"}:
         raise SafetyError("unsupported_type", "only .csv and .feather files are allowed")
+    if name_looks_secret(current.name) or text_contains_secret(current.name):
+        raise SafetyError("secret_in_name", "data file name contains secret-like material")
     if current.stat().st_size > limit("max_file_bytes"):
         raise SafetyError("file_too_large", "data file exceeds the engineering size limit")
     return current
@@ -166,6 +199,8 @@ def list_data_files(root: Path | None = None) -> list[dict]:
     found = []
     for entry in sorted(root_real.iterdir(), key=lambda p: p.name):
         if entry.is_symlink() or not entry.is_file():
+            continue
+        if name_looks_secret(entry.name) or text_contains_secret(entry.name):
             continue
         if entry.suffix.lower() not in {".csv", ".feather"}:
             continue
@@ -277,6 +312,103 @@ def load_pickle(path):
         raise SafetyError("file_too_large", "pickle file exceeds the engineering size limit")
     with file_path.open("rb") as handle:
         return pickle.load(handle)
+
+
+def secret_values(extra: tuple[str, ...] | list[str] = ()) -> list[str]:
+    found = []
+    for name in SECRET_ENV_NAMES:
+        raw = os.environ.get(name, "")
+        if isinstance(raw, str) and len(raw.strip()) >= 6:
+            found.append(raw.strip())
+    for item in extra:
+        if isinstance(item, str) and len(item) >= 6:
+            found.append(item)
+    return found
+
+
+def scrub_text(value, extra: tuple[str, ...] | list[str] = ()) -> str:
+    text = value if isinstance(value, str) else str(value)
+    for secret in secret_values(extra):
+        text = text.replace(secret, "[redacted]")
+    text = _SECRET_FIELD_RE.sub("[redacted]", text)
+    text = _CANARY_RE.sub("[redacted]", text)
+    return text
+
+
+_SECRET_NAME_RE = re.compile(r"(?i)(api[_-]?key|api[_-]?secret|access[_-]?token|secret|password|bearer|canary|credential)")
+
+
+def name_looks_secret(name: str) -> bool:
+    return _SECRET_NAME_RE.search(str(name)) is not None
+
+
+def text_contains_secret(value, extra: tuple[str, ...] | list[str] = ()) -> bool:
+    """Detect secret-like values. Do not use this on ordinary field names such as secrets_read."""
+    raw = value if isinstance(value, str) else str(value)
+    if _CANARY_RE.search(raw) or _SECRET_FIELD_RE.search(raw):
+        return True
+    return any(secret in raw for secret in secret_values(extra))
+
+
+class RedactingLogFilter:
+    """Drop secret material from log records. This does not control other processes."""
+
+    def filter(self, record) -> bool:
+        record.msg = scrub_text(record.msg)
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {key: scrub_text(item) if isinstance(item, str) else item for key, item in record.args.items()}
+            else:
+                record.args = tuple(scrub_text(item) if isinstance(item, str) else item for item in record.args)
+        return True
+
+
+def install_log_redactor(logger) -> None:
+    redactor = RedactingLogFilter()
+    if not any(isinstance(item, RedactingLogFilter) for item in logger.filters):
+        logger.addFilter(redactor)
+    for handler in logger.handlers:
+        if not any(isinstance(item, RedactingLogFilter) for item in handler.filters):
+            handler.addFilter(redactor)
+
+
+class PythonSocketBlock:
+    """Block new socket connections inside this process.
+
+    This is not OS-enforced isolation. Native code, another process, or a
+    process started before the patch can still use the network. Deployment
+    isolation has to be applied by the OS or the container runtime.
+    """
+
+    def __enter__(self):
+        import socket
+
+        self._socket = socket
+        self._original = socket.socket
+
+        class _BlockedSocket(socket.socket):
+            def connect(self, *args, **kwargs):
+                raise SafetyError("python_network_block", ISOLATION_BOUNDARY)
+
+            def connect_ex(self, *args, **kwargs):
+                raise SafetyError("python_network_block", ISOLATION_BOUNDARY)
+
+        socket.socket = _BlockedSocket
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._socket.socket = self._original
+        return False
+
+
+def reject_active_promotion(relative_path: str) -> None:
+    """Learning or evolution must not replace active security or model code."""
+    normalized = relative_path.replace("\\", "/").lstrip("./")
+    if normalized in ACTIVE_POLICY_FILES or Path(normalized).name in {item.split("/")[-1] for item in ACTIVE_POLICY_FILES}:
+        raise SafetyError(
+            "policy_frozen",
+            "Learning cannot mutate security policy or promote candidate code into the active path.",
+        )
 
 
 def redact_mapping(value):

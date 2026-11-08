@@ -9,13 +9,20 @@ import requests
 import json
 import time
 import random
-import akshare as ak
+class _MarketIngestionDisabled:
+    def __getattr__(self, _name):
+        from ingestion_gate import refuse_market_ingestion
+        refuse_market_ingestion("akshare")
+
+ak = _MarketIngestionDisabled()
 from typing import Dict, List, Tuple, Optional
 
 warnings.filterwarnings('ignore')
 
 # 添加项目路径以便导入自定义模块
-sys.path.append("../")
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 try:
     from model import Kronos, KronosTokenizer, KronosPredictor
 except ImportError:

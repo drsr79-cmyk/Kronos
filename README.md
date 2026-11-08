@@ -102,7 +102,10 @@ Kronos is an offline forecasting library by default. It is not a broker and not 
 - Pickle dataset loads stay off unless `KRONOS_ALLOW_PICKLE=1`.
 - The web UI binds to `127.0.0.1`, disables the debugger, and does not install packages or load CDN scripts. API calls require the local session cookie plus `X-Kronos-Request: 1`.
 - Lookback, prediction length, sample count, file size, and batch size have engineering ceilings. Those ceilings are memory guards, not investment policy.
-- A forecast is not a paper order, a paper trade, or a portfolio return.
+- A forecast is not a paper order, a paper trade, or a portfolio return. There is no promise of profit or of winning.
+- `offline_worker.py` reads sanitized local CSV snapshots and does not take market-data API keys. `ingestion_gate.py` refuses market-data fetches; ingestion is not deployed.
+- In-process socket blocking is not OS-enforced network isolation. A firewall, network namespace, or offline container is a separate deployment control.
+- Learning code must not replace `kronos_safety.py`, the offline worker, the ingestion gate, or the active model and web UI modules.
 
 ```python
 from model import Kronos, KronosTokenizer, KronosPredictor
